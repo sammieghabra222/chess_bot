@@ -6,7 +6,7 @@ Python 3.9+, berserk 0.14, python-chess 1.999
 
 import os, random, threading, berserk, chess
 from typing import Optional, Protocol
-from strategies import RandomPlayer, MoveStrategy   # << new
+from strategies import RandomPlayer, MoveStrategy, Gemini25ProStrategy    # << new
 
 
 # ──────────────────────── 2. Boilerplate setup ──────────────────────────
@@ -15,7 +15,7 @@ session = berserk.TokenSession(TOKEN)
 client  = berserk.Client(session=session)
 BOT_ID  = client.account.get()["id"].lower()
 
-STRATEGY: MoveStrategy = RandomPlayer()   # << switch this variable only
+STRATEGY: MoveStrategy = Gemini25ProStrategy()
 
 def side_has_bot(side: dict) -> bool:
     sid = lambda k: str(k).lower()
