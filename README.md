@@ -23,6 +23,6 @@ pip install berserk python-chess
 export LICHESS_TOKEN=pa_xxxxxxxxxxxxxxxxx
 
 # 4 – run the bot
-python main.py
+python bot.py
 
 
