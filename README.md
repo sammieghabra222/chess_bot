@@ -5,6 +5,12 @@ replies with totally random legal moves.
 Built for learning + experimentation rather than strong play.
 This should work out of the box.
 
+1. Gemini Model 
+ - Messed up on castling ??? 
+ - made some ill fated knight jumps
+ - still takes a while to make moves
+ - blundered mate in 1. 
+
 ---
 
 ## Quick start

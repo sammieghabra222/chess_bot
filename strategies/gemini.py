@@ -116,11 +116,10 @@ class Gemini25ProStrategy:
             return int(final_score) if board.turn == chess.WHITE else -int(final_score)
 
     def _order_moves(self, board: chess.Board, legal_moves: list) -> list:
-        # A simple move ordering for demonstration: captures first
-        # A full implementation would use MVV-LVA, killers, history etc.
-        captures = [m for m in legal_moves if board.is_capture(m)]
-        others = [m for m in legal_moves if not board.is_capture(m)]
-        return captures + others
+        """
+        Orders moves based on their value, using a scoring heuristic (MVV-LVA).
+        """
+        return sorted(legal_moves, key=lambda move: self._get_move_value(board, move), reverse=True)
 
     def _quiescence(self, board: chess.Board, alpha: float, beta: float) -> int:
         stand_pat = self._evaluate(board)
@@ -129,8 +128,14 @@ class Gemini25ProStrategy:
         if alpha < stand_pat:
             alpha = stand_pat
 
-        # Only search captures in quiescence
-        for move in self._order_moves(board, [m for m in board.legal_moves if board.is_capture(m)]):
+        # Search captures and non-capturing checks
+        moves_to_search = []
+        for move in board.legal_moves:
+            if board.is_capture(move) or board.gives_check(move):
+                moves_to_search.append(move)
+
+        # Order these important moves before searching
+        for move in self._order_moves(board, moves_to_search):
             board.push(move)
             score = -self._quiescence(board, -beta, -alpha)
             board.pop()
@@ -140,6 +145,28 @@ class Gemini25ProStrategy:
             if score > alpha:
                 alpha = score
         return alpha
+
+    def _get_move_value(self, board: chess.Board, move: chess.Move) -> int:
+        """
+        Assigns a score to a move for ordering, prioritizing valuable captures.
+        """
+        if board.is_capture(move):
+            # En-passant capture, where the 'to' square is empty
+            if board.is_en_passant(move):
+                return PIECE_VALUES_MG[chess.PAWN] + 500  # Give it a high score
+
+            attacker = board.piece_at(move.from_square)
+            victim = board.piece_at(move.to_square)
+            
+            # In case of promotion captures, the attacker is a pawn
+            attacker_value = PIECE_VALUES_MG[attacker.piece_type]
+            victim_value = PIECE_VALUES_MG[victim.piece_type]
+            
+            # MVV-LVA: High victim value and low attacker value is best
+            return victim_value - attacker_value + 1000
+        
+        # Placeholder for killer moves/history heuristic in the future
+        return 0
 
     def _negamax(self, board: chess.Board, depth: int, alpha: float, beta: float) -> int:
         zobrist_key = chess.polyglot.zobrist_hash(board)
@@ -223,20 +250,19 @@ class Gemini25ProStrategy:
         # 2. Try to find a move in the opening book
         if self.book_reader:
             try:
-                entry = self.book_reader.weighted_choice(board)
-                return entry.move
+                return self.book_reader.weighted_choice(board).move
             except IndexError:
                 # Position not in book, proceed to search
                 pass
 
-        # 3. If not in book, perform search
-        # Simple time management: use 1/30th of remaining time, or a fixed depth
-        # A real implementation would get time controls from the lichess client.
-        # For this example, we use a fixed depth search.
+        # 3. If not in book, perform an iterative deepening search with a time limit
+        self.transposition_table.clear()
         
-        self.transposition_table.clear() # Clear TT for each new move
-        
-        # Iterative deepening would be called here with a time limit.
-        # For simplicity, we call a fixed-depth search.
-        # return self._iterative_deepening_search(board, time_limit=5)
-        return self._search_at_depth(board, self.fixed_depth)
+        # Use iterative deepening to prevent "freezing" and adapt to position complexity.
+        # Set a time limit (e.g., 5 seconds). This can be adjusted.
+        try:
+            return self._iterative_deepening_search(board, time_limit=5.0)
+        except Exception as e:
+            print(f"An error occurred during search: {e}")
+            # As a fallback, return a random legal move if search fails
+            return random.choice(list(board.legal_moves))
