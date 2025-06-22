@@ -6,7 +6,7 @@ Python 3.9+, berserk 0.14, python-chess 1.999
 
 import os, random, threading, berserk, chess, traceback
 from typing import Optional, Protocol
-from strategies import RandomPlayer, MoveStrategy, Gemini25ProStrategy    # << new
+from strategies import RandomPlayer, MoveStrategy, Gemini25ProStrategy, OpenAIStrategy    # << new
 
 
 # ──────────────────────── 2. Boilerplate setup ──────────────────────────
@@ -19,7 +19,8 @@ session = berserk.TokenSession(TOKEN)
 client  = berserk.Client(session=session)
 BOT_ID  = client.account.get()["id"].lower()
 
-STRATEGY: MoveStrategy = Gemini25ProStrategy()
+#STRATEGY: MoveStrategy = Gemini25ProStrategy()
+STRATEGY: MoveStrategy = OpenAIStrategy()
 
 def side_has_bot(side: dict) -> bool:
     """Checks if the bot is playing on the given side."""
