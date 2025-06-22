@@ -3,6 +3,7 @@
 A minimal Lichess BOT that accepts **casual ▸ standard** challenges and
 replies with totally random legal moves.  
 Built for learning + experimentation rather than strong play.
+This should work out of the box.
 
 ---
 
@@ -23,3 +24,5 @@ export LICHESS_TOKEN=pa_xxxxxxxxxxxxxxxxx
 
 # 4 – run the bot
 python main.py
+
+
