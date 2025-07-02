@@ -146,7 +146,6 @@ for evt in client.bots.stream_incoming_events():
         if ch["variant"]["key"] == "standard" and not ch["rated"]:
             try:
                 client.challenges.accept(ch["id"])
-                print(f"Accepted challenge from {ch['challenger']['id']}", flush=True)
             except berserk.exceptions.ResponseError as e:
                 print(f"Failed to accept challenge {ch['id']}: {e}", flush=True)
         else:

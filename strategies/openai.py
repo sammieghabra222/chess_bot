@@ -1,14 +1,35 @@
 import chess
+import random
 
 class OpenAIStrategy:
+
+
+    OPENINGS = {
+        "Caro-Kahn": [
+            ["e4", "c6"]
+        ],
+        "Double King's Pawn": [
+            ["e4", "e5"]
+        ],
+        "Scandinavian": [
+            ["e4", "d5"]
+        ]
+    }
+
     """
     A MoveStrategy implementation that selects moves using 
     minimax search with alpha-beta pruning and heuristic evaluation.
     """
-    def __init__(self, depth: int = 3):
+    def __init__(self, depth: int = 3, opening_name: str = "Caro-Kahn"):
         self.depth = depth  # search depth in plies (half-moves)
         # Piece values in centipawns (Pawn=100, Knight=320, Bishop=330, Rook=500, Queen=900).
         # King is not included in material evaluation (handled via checkmate detection).
+        self.opening_name = opening_name
+        if opening_name and opening_name in self.OPENINGS:
+            self.variation = random.choice(self.OPENINGS[opening_name])
+        else:
+            self.variation = None
+
         self.piece_values = {
             chess.PAWN: 100, 
             chess.KNIGHT: 320, 
@@ -184,6 +205,17 @@ class OpenAIStrategy:
         Choose the best move for the current player (side to move) using minimax search.
         Returns a chess.Move object.
         """
+
+        ply = len(board.move_stack)
+        if self.variation and ply < len(self.variation):
+            san = self.variation[ply]            # e.g. "c6" on ply 1
+            try:
+                move = board.parse_san(san)
+                return move
+            except ValueError:
+                # if for some reason SAN fails (illegal), fall through to search
+                pass
+
         # If no moves available (game over), return None
         if board.is_game_over():
             return None
