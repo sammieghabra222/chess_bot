@@ -198,7 +198,12 @@ class OpenAIStrategy:
                 else:
                     black_score += king_table[chess.square_mirror(square)]
         # Overall evaluation is material+positional score difference
-        return white_score - black_score
+        score = white_score - black_score
+        score += self.rook_file_bonus(board)
+        score += self.bishop_diagonal_bonus(board)
+        score += self.knight_outpost_bonus(board)
+        return score
+
 
     def select_move(self, board: chess.Board) -> chess.Move:
         """
@@ -272,6 +277,84 @@ class OpenAIStrategy:
                 break
 
         return best_move
+
+    def bishop_diagonal_bonus(self, board: chess.Board) -> int:
+        bonus = 0
+        for square, piece in board.piece_map().items():
+            if piece.piece_type != chess.BISHOP:
+                continue
+            # get bishop attack rays (all squares it could move to ignoring blockers)
+            attacks = board.attacks(square)
+            # filter only diagonal directions: chess.BISHOP moves are all attacks
+            # but we only care about pawns on those rays
+            # so intersect attacks with every pawn square
+            pawn_sqs = [sq for sq in attacks if board.piece_type_at(sq) == chess.PAWN]
+            if not pawn_sqs:
+                bonus += (  20 if piece.color == chess.WHITE else -20 )
+        return bonus
+
+
+    def knight_outpost_bonus(self, board: chess.Board) -> int:
+        bonus = 0
+        # Define the “outpost” ranks (0-7 = a1-h1 through a8-h8). 
+        # For White we want them on ranks 4–7 (indexes 3–6), for Black on ranks 1–4 (indexes 0–3).
+        for square, piece in board.piece_map().items():
+            if piece.piece_type != chess.KNIGHT:
+                continue
+
+            rank = chess.square_rank(square)
+            # Only consider knights in opponent’s half
+            if piece.color == chess.WHITE:
+                if rank < 3:  # rank 4 is index 3
+                    continue
+            else:
+                if rank > 4:  # rank 5 is index 4
+                    continue
+
+            # Are there any friendly pawn attackers?
+            friendly_pawn_attackers = [
+                sq for sq in board.attackers(piece.color, square)
+                if board.piece_type_at(sq) == chess.PAWN
+            ]
+            if not friendly_pawn_attackers:
+                continue
+
+            # Are there any enemy pawn attackers?
+            enemy_pawn_attackers = [
+                sq for sq in board.attackers(not piece.color, square)
+                if board.piece_type_at(sq) == chess.PAWN
+            ]
+            if enemy_pawn_attackers:
+                continue
+
+            bonus += (25 if piece.color == chess.WHITE else -25)
+
+        return bonus
+
+
+    def rook_file_bonus(self, board: chess.Board) -> int:
+        bonus = 0
+        for square, piece in board.piece_map().items():
+            if piece.piece_type != chess.ROOK:
+                continue
+            file_index = chess.square_file(square)  # 0=a-file, …,7=h-file
+            # gather all squares on that file
+            file_squares = [chess.square(file_index, rank) for rank in range(8)]
+            # count pawns
+            pawns = [board.piece_type_at(sq) == chess.PAWN for sq in file_squares]
+            if not any(pawns):
+                # open file
+                bonus += (  30 if piece.color == chess.WHITE else -30 )
+            else:
+                # half-open: no friendly pawn
+                friend_pawns = [board.piece_at(sq) 
+                                and board.piece_at(sq).piece_type == chess.PAWN 
+                                and board.piece_at(sq).color == piece.color 
+                                for sq in file_squares]
+                if not any(friend_pawns):
+                    bonus += (  15 if piece.color == chess.WHITE else -15 )
+        return bonus
+
 
     def _alphabeta(self, board: chess.Board, depth: int, alpha: int, beta: int, maximizing: bool) -> int:
         """
