@@ -25,3 +25,5 @@ Thumbs.db
 
 # Environment variables or secrets (if you move token to a file)
 .env
+
+*.pth
