@@ -1,55 +1,85 @@
 import chess
 import random
+from collections import namedtuple
+from chess import polyglot
+
+tt_entry = namedtuple("TTEntry", "depth flag score best_move")
+EXACT, LOWERBOUND, UPPERBOUND = 0, 1, 2
 
 class OpenAIStrategy:
+    """
+    A MoveStrategy implementation that selects moves using minimax search
+    with alpha-beta pruning and heuristic evaluation. It now includes an
+    expanded, randomized opening book.
+    """
 
-
+    # Expanded opening repertoire with multiple variations
     OPENINGS = {
-        "Caro-Kahn": [
+        "Sicilian Defense": [
+            ["e4", "c5"]
+        ],
+        "Ruy Lopez": [
+            ["e4", "e5", "Nf3", "Nc6", "Bb5"]
+        ],
+        "Italian Game": [
+            ["e4", "e5", "Nf3", "Nc6", "Bc4"]
+        ],
+        "French Defense": [
+            ["e4", "e6"]
+        ],
+        "Caro-Kann Defense": [
             ["e4", "c6"]
+        ],
+        "Queen's Gambit": [
+            ["d4", "d5", "c4"]
+        ],
+        "King's Indian Defense": [
+            ["d4", "Nf6", "c4", "g6"]
+        ],
+        "Slav Defense": [
+            ["d4", "d5", "c4", "c6"]
+        ],
+        "Scandinavian Defense": [
+            ["e4", "d5"]
         ],
         "Double King's Pawn": [
             ["e4", "e5"]
-        ],
-        "Scandinavian": [
-            ["e4", "d5"]
         ]
     }
 
-    """
-    A MoveStrategy implementation that selects moves using 
-    minimax search with alpha-beta pruning and heuristic evaluation.
-    """
-    def __init__(self, depth: int = 3, opening_name: str = "Caro-Kahn"):
+    def __init__(self, depth: int = 5):
         self.depth = depth  # search depth in plies (half-moves)
-        # Piece values in centipawns (Pawn=100, Knight=320, Bishop=330, Rook=500, Queen=900).
-        # King is not included in material evaluation (handled via checkmate detection).
-        self.opening_name = opening_name
-        if opening_name and opening_name in self.OPENINGS:
-            self.variation = random.choice(self.OPENINGS[opening_name])
-        else:
-            self.variation = None
 
+        # --- MODIFICATION: Randomly select an opening ---
+        # A random opening name is chosen from the dictionary keys
+        opening_name = random.choice(list(self.OPENINGS.keys()))
+        # A random variation for that opening is selected
+        self.variation = random.choice(self.OPENINGS[opening_name])
+        # You can print this to see which opening was chosen for the game
+        print(f"Chosen Opening: {opening_name}")
+
+        self.tt = {}
+
+        # Piece values in centipawns (Pawn=100, Knight=320, Bishop=330, Rook=500, Queen=900).
         self.piece_values = {
-            chess.PAWN: 100, 
-            chess.KNIGHT: 320, 
-            chess.BISHOP: 330, 
-            chess.ROOK: 500, 
+            chess.PAWN: 100,
+            chess.KNIGHT: 320,
+            chess.BISHOP: 330,
+            chess.ROOK: 500,
             chess.QUEEN: 900,
-            chess.KING: 0    # King's value is set to 0 for evaluation (checkmate handled separately)
+            chess.KING: 0
         }
-        # Piece-Square Tables for white (indexed by square 0= a1, ..., 63 = h8).
+        # Piece-Square Tables for white (indexed by square 0=a1, ..., 63=h8).
         # Values in centipawns giving positional bonus/penalty for each piece type.
         self.pawn_table = [
-            # Rank 1 to 8 (from white's perspective)
-            0, 0, 0, 0, 0, 0, 0, 0,           # a1 ... h1
-            5, 10, 10,-20,-20, 10, 10, 5,     # a2 ... h2
-            5, -5,-10,  0,  0,-10, -5, 5,     # a3 ... h3
-            0,  0,  0, 20, 20,  0,  0, 0,     # a4 ... h4
-            5,  5, 10, 25, 25, 10,  5, 5,     # a5 ... h5
-            10, 10, 20, 30, 30, 20, 10, 10,   # a6 ... h6
-            50, 50, 50, 50, 50, 50, 50, 50,   # a7 ... h7
-            0,  0,  0,  0,  0,  0,  0,  0      # a8 ... h8
+            0, 0, 0, 0, 0, 0, 0, 0,
+            5, 10, 10,-20,-20, 10, 10, 5,
+            5, -5,-10,  0,  0,-10, -5, 5,
+            0,  0,  0, 20, 20,  0,  0, 0,
+            5,  5, 10, 25, 25, 10,  5, 5,
+            10, 10, 20, 30, 30, 20, 10, 10,
+            50, 50, 50, 50, 50, 50, 50, 50,
+            0,  0,  0,  0,  0,  0,  0,  0
         ]
         self.knight_table = [
             -50,-40,-30,-30,-30,-30,-40,-50,
@@ -91,7 +121,6 @@ class OpenAIStrategy:
             -10,  0,  0,  0,  0,  0,  0,-10,
             -20,-10,-10, -5, -5,-10,-10,-20
         ]
-        # King tables for middle-game and endgame.
         self.king_table_mid = [
             20, 30, 10,  0,  0, 10, 30, 20,
             20, 20,  0,  0,  0,  0, 20, 20,
@@ -115,22 +144,13 @@ class OpenAIStrategy:
 
     def is_endgame(self, board: chess.Board) -> bool:
         """Determine if the position is an endgame (used to switch king PST)."""
-        # A simple heuristic: consider it endgame if no queens are on the board,
-        # or if total non-pawn material is very low.
         if board.is_checkmate() or board.is_stalemate():
-            return True  # game over is treated as endgame scenario for evaluation
-        # If no queens for either side:
+            return True
         if not board.pieces(chess.QUEEN, chess.WHITE) and not board.pieces(chess.QUEEN, chess.BLACK):
             return True
-        # Calculate total material (excluding pawns and kings) for each side
-        white_material = 0
-        black_material = 0
-        for piece_type in [chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.QUEEN]:
-            white_material += len(board.pieces(piece_type, chess.WHITE)) * self.piece_values[piece_type]
-            black_material += len(board.pieces(piece_type, chess.BLACK)) * self.piece_values[piece_type]
-        # If both sides have very low material (e.g., <= one minor each), consider endgame
+        white_material = sum(len(board.pieces(pt, chess.WHITE)) * self.piece_values[pt] for pt in [chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.QUEEN])
+        black_material = sum(len(board.pieces(pt, chess.BLACK)) * self.piece_values[pt] for pt in [chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.QUEEN])
         if white_material <= 500 and black_material <= 500:
-            # 500 centipawns ~ value of a rook or minor piece
             return True
         return False
 
@@ -139,254 +159,209 @@ class OpenAIStrategy:
         Evaluate the board position and return a score (centipawns).
         Positive scores favor White, negative favor Black.
         """
-        # If game is over, return a high/low value for checkmate or 0 for draw
         if board.is_checkmate():
-            # If it's checkmate, the side to move has no moves and is in check.
-            # That means the *previous* move delivered mate.
-            return (-100000 if board.turn == chess.WHITE else 100000)
+            return -100000 if board.turn == chess.WHITE else 100000
         if board.is_stalemate() or board.is_insufficient_material():
-            return 0  # draw
+            return 0
 
-        # Select appropriate king table depending on phase
-        if self.is_endgame(board):
-            king_table = self.king_table_end
-        else:
-            king_table = self.king_table_mid
-
-        # Sum up material and positional scores
-        white_score = 0
-        black_score = 0
+        king_table = self.king_table_end if self.is_endgame(board) else self.king_table_mid
+        score = 0
         for square, piece in board.piece_map().items():
-            value = self.piece_values[piece.piece_type]
-            # Add piece material value
-            if piece.color == chess.WHITE:
-                white_score += value
-            else:
-                black_score += value
-            # Add piece-square table value (positional bonus)
+            piece_value = self.piece_values[piece.piece_type]
+            positional_value = 0
+            
+            # Select the correct piece-square table
             if piece.piece_type == chess.PAWN:
-                # Pawns use pawn_table
-                if piece.color == chess.WHITE:
-                    white_score += self.pawn_table[square]
-                else:
-                    # mirror the square for black pawn
-                    black_score += self.pawn_table[chess.square_mirror(square)]
+                table = self.pawn_table
             elif piece.piece_type == chess.KNIGHT:
-                if piece.color == chess.WHITE:
-                    white_score += self.knight_table[square]
-                else:
-                    black_score += self.knight_table[chess.square_mirror(square)]
+                table = self.knight_table
             elif piece.piece_type == chess.BISHOP:
-                if piece.color == chess.WHITE:
-                    white_score += self.bishop_table[square]
-                else:
-                    black_score += self.bishop_table[chess.square_mirror(square)]
+                table = self.bishop_table
             elif piece.piece_type == chess.ROOK:
-                if piece.color == chess.WHITE:
-                    white_score += self.rook_table[square]
-                else:
-                    black_score += self.rook_table[chess.square_mirror(square)]
+                table = self.rook_table
             elif piece.piece_type == chess.QUEEN:
-                if piece.color == chess.WHITE:
-                    white_score += self.queen_table[square]
-                else:
-                    black_score += self.queen_table[chess.square_mirror(square)]
+                table = self.queen_table
             elif piece.piece_type == chess.KING:
-                # Use king positional table
-                if piece.color == chess.WHITE:
-                    white_score += king_table[square]
-                else:
-                    black_score += king_table[chess.square_mirror(square)]
-        # Overall evaluation is material+positional score difference
-        score = white_score - black_score
+                table = king_table
+
+            # Get positional value from the table
+            if piece.color == chess.WHITE:
+                positional_value = table[square]
+                score += piece_value + positional_value
+            else:
+                # Mirror the square for Black's perspective
+                positional_value = table[chess.square_mirror(square)]
+                score -= (piece_value + positional_value)
+                
+        # Add heuristic bonuses
         score += self.rook_file_bonus(board)
         score += self.bishop_diagonal_bonus(board)
         score += self.knight_outpost_bonus(board)
-        return score
 
+        return score
 
     def select_move(self, board: chess.Board) -> chess.Move:
         """
-        Choose the best move for the current player (side to move) using minimax search.
-        Returns a chess.Move object.
+        Choose the best move for the current player using minimax search.
+        Plays from the opening book if applicable.
         """
-
+        # Play from opening book if moves are available
         ply = len(board.move_stack)
         if self.variation and ply < len(self.variation):
-            san = self.variation[ply]            # e.g. "c6" on ply 1
+            san = self.variation[ply]
             try:
                 move = board.parse_san(san)
-                return move
+                if move in board.legal_moves:
+                    return move
             except ValueError:
-                # if for some reason SAN fails (illegal), fall through to search
+                # Fall through to search if the opening move is illegal
                 pass
 
-        # If no moves available (game over), return None
         if board.is_game_over():
             return None
 
         best_move = None
-        # Initialize alpha-beta bounds
-        alpha = -1000000
-        beta = 1000000
-
-        # Determine if we are maximizing or minimizing
+        alpha = -float('inf')
+        beta = float('inf')
         maximizing_player = (board.turn == chess.WHITE)
-
-        if maximizing_player:
-            max_eval = -1000000
-        else:
-            min_eval = 1000000
-
-        # Order moves: prioritize captures and checks for better pruning
+        
+        # Simple move ordering: captures and checks first
         def move_priority(move: chess.Move) -> int:
             score = 0
-            # Encourage moves that capture valuable opponent pieces
             if board.is_capture(move):
-                captured_piece = board.piece_at(move.to_square)
-                if captured_piece:
-                    score += 10 * self.piece_values[captured_piece.piece_type]
-            # Encourage moves that put opponent in check
+                captured = board.piece_at(move.to_square)
+                if captured: score += 10 * self.piece_values[captured.piece_type]
             if board.gives_check(move):
                 score += 5
-            # (We give higher score to moves we want to consider first)
             return score
 
-        moves = list(board.legal_moves)
-        moves.sort(key=move_priority, reverse=True)
+        moves = sorted(list(board.legal_moves), key=move_priority, reverse=True)
 
-        # Search each move
-        for move in moves:
-            board.push(move)
-            score = self._alphabeta(board, self.depth - 1, alpha, beta, not maximizing_player)
-            board.pop()
-
-            if maximizing_player:
-                if score > max_eval:
-                    max_eval = score
+        if maximizing_player:
+            max_eval = -float('inf')
+            for move in moves:
+                board.push(move)
+                eval_score = self._alphabeta(board, self.depth - 1, alpha, beta, False)
+                board.pop()
+                if eval_score > max_eval:
+                    max_eval = eval_score
                     best_move = move
-                alpha = max(alpha, max_eval)
-            else:
-                if score < min_eval:
-                    min_eval = score
+                alpha = max(alpha, eval_score)
+                if beta <= alpha:
+                    break
+        else: # Minimizing player
+            min_eval = float('inf')
+            for move in moves:
+                board.push(move)
+                eval_score = self._alphabeta(board, self.depth - 1, alpha, beta, True)
+                board.pop()
+                if eval_score < min_eval:
+                    min_eval = eval_score
                     best_move = move
-                beta = min(beta, min_eval)
-
-            # Alpha-beta cutoff
-            if alpha >= beta:
-                break
-
-        return best_move
+                beta = min(beta, eval_score)
+                if beta <= alpha:
+                    break
+        
+        return best_move if best_move is not None else random.choice(list(board.legal_moves))
 
     def bishop_diagonal_bonus(self, board: chess.Board) -> int:
         bonus = 0
-        for square, piece in board.piece_map().items():
-            if piece.piece_type != chess.BISHOP:
-                continue
-            # get bishop attack rays (all squares it could move to ignoring blockers)
-            attacks = board.attacks(square)
-            # filter only diagonal directions: chess.BISHOP moves are all attacks
-            # but we only care about pawns on those rays
-            # so intersect attacks with every pawn square
-            pawn_sqs = [sq for sq in attacks if board.piece_type_at(sq) == chess.PAWN]
-            if not pawn_sqs:
-                bonus += (  20 if piece.color == chess.WHITE else -20 )
+        for sq in board.pieces(chess.BISHOP, chess.WHITE):
+            if not any(board.piece_type_at(s) == chess.PAWN for s in board.attacks(sq)):
+                bonus += 20
+        for sq in board.pieces(chess.BISHOP, chess.BLACK):
+            if not any(board.piece_type_at(s) == chess.PAWN for s in board.attacks(sq)):
+                bonus -= 20
         return bonus
-
 
     def knight_outpost_bonus(self, board: chess.Board) -> int:
         bonus = 0
-        # Define the “outpost” ranks (0-7 = a1-h1 through a8-h8). 
-        # For White we want them on ranks 4–7 (indexes 3–6), for Black on ranks 1–4 (indexes 0–3).
-        for square, piece in board.piece_map().items():
-            if piece.piece_type != chess.KNIGHT:
-                continue
-
-            rank = chess.square_rank(square)
-            # Only consider knights in opponent’s half
-            if piece.color == chess.WHITE:
-                if rank < 3:  # rank 4 is index 3
+        for color in [chess.WHITE, chess.BLACK]:
+            for sq in board.pieces(chess.KNIGHT, color):
+                rank = chess.square_rank(sq)
+                # Check if knight is in opponent's half
+                if (color == chess.WHITE and rank < 3) or (color == chess.BLACK and rank > 4):
                     continue
-            else:
-                if rank > 4:  # rank 5 is index 4
-                    continue
-
-            # Are there any friendly pawn attackers?
-            friendly_pawn_attackers = [
-                sq for sq in board.attackers(piece.color, square)
-                if board.piece_type_at(sq) == chess.PAWN
-            ]
-            if not friendly_pawn_attackers:
-                continue
-
-            # Are there any enemy pawn attackers?
-            enemy_pawn_attackers = [
-                sq for sq in board.attackers(not piece.color, square)
-                if board.piece_type_at(sq) == chess.PAWN
-            ]
-            if enemy_pawn_attackers:
-                continue
-
-            bonus += (25 if piece.color == chess.WHITE else -25)
-
+                # Check if protected by a friendly pawn and not attackable by an enemy pawn
+                if any(board.piece_type_at(s) == chess.PAWN for s in board.attackers(color, sq)) and \
+                   not any(board.piece_type_at(s) == chess.PAWN for s in board.attackers(not color, sq)):
+                    bonus += 25 if color == chess.WHITE else -25
         return bonus
-
 
     def rook_file_bonus(self, board: chess.Board) -> int:
         bonus = 0
-        for square, piece in board.piece_map().items():
-            if piece.piece_type != chess.ROOK:
-                continue
-            file_index = chess.square_file(square)  # 0=a-file, …,7=h-file
-            # gather all squares on that file
-            file_squares = [chess.square(file_index, rank) for rank in range(8)]
-            # count pawns
-            pawns = [board.piece_type_at(sq) == chess.PAWN for sq in file_squares]
-            if not any(pawns):
-                # open file
-                bonus += (  30 if piece.color == chess.WHITE else -30 )
-            else:
-                # half-open: no friendly pawn
-                friend_pawns = [board.piece_at(sq) 
-                                and board.piece_at(sq).piece_type == chess.PAWN 
-                                and board.piece_at(sq).color == piece.color 
-                                for sq in file_squares]
-                if not any(friend_pawns):
-                    bonus += (  15 if piece.color == chess.WHITE else -15 )
+        for color in [chess.WHITE, chess.BLACK]:
+            for sq in board.pieces(chess.ROOK, color):
+                file_index = chess.square_file(sq)
+                file_pawns = [s for s in chess.SQUARES_180 if chess.square_file(s) == file_index and board.piece_type_at(s) == chess.PAWN]
+                
+                if not file_pawns: # Open file
+                    bonus += 30 if color == chess.WHITE else -30
+                elif not any(board.piece_at(p).color == color for p in file_pawns): # Half-open file
+                    bonus += 15 if color == chess.WHITE else -15
         return bonus
-
 
     def _alphabeta(self, board: chess.Board, depth: int, alpha: int, beta: int, maximizing: bool) -> int:
         """
-        Recursively apply minimax with alpha-beta pruning and return the evaluation score.
+        Alpha-beta with transposition table and move ordering optimizations.
         """
-        # Evaluate at leaf node or terminal position
-        if depth == 0 or board.is_game_over():
-            return self.evaluate(board)
+        key = polyglot.zobrist_hash(board)
+        orig_alpha, orig_beta = alpha, beta
+        best_local = None
 
-        if maximizing:
-            max_eval = -1000000
-            for move in board.legal_moves:
-                board.push(move)
-                score = self._alphabeta(board, depth - 1, alpha, beta, False)
-                board.pop()
-                if score > max_eval:
-                    max_eval = score
-                if max_eval > alpha:
-                    alpha = max_eval
-                if beta <= alpha:
-                    break  # beta cut-off
-            return max_eval
+        # TT lookup
+        if key in self.tt:
+            entry = self.tt[key]
+            if entry.depth >= depth:
+                if entry.flag == EXACT:
+                    return entry.score
+                elif entry.flag == LOWERBOUND:
+                    alpha = max(alpha, entry.score)
+                elif entry.flag == UPPERBOUND:
+                    beta = min(beta, entry.score)
+                if alpha >= beta:
+                    return entry.score
+
+        # Leaf node evaluation
+        if depth == 0 or board.is_game_over():
+            score = self.evaluate(board)
         else:
-            min_eval = 1000000
-            for move in board.legal_moves:
+            # Generate and order moves: TT best move first, then captures/checks
+            legal = list(board.legal_moves)
+            # Move ordering by TT data
+            if key in self.tt:
+                best_move = self.tt[key].best_move
+                if best_move in legal:
+                    legal.remove(best_move)
+                    legal.insert(0, best_move)
+            # Simple heuristics for ordering
+            legal.sort(key=lambda m: (board.is_capture(m), board.gives_check(m)), reverse=True)
+
+            score = -float('inf') if maximizing else float('inf')
+            best_local = None
+            for move in legal:
                 board.push(move)
-                score = self._alphabeta(board, depth - 1, alpha, beta, True)
+                val = self._alphabeta(board, depth-1, alpha, beta, not maximizing)
                 board.pop()
-                if score < min_eval:
-                    min_eval = score
-                if min_eval < beta:
-                    beta = min_eval
-                if beta <= alpha:
-                    break  # alpha cut-off
-            return min_eval
+
+                if maximizing:
+                    if val > score:
+                        score, best_local = val, move
+                    alpha = max(alpha, val)
+                else:
+                    if val < score:
+                        score, best_local = val, move
+                    beta = min(beta, val)
+
+                if alpha >= beta:
+                    break
+
+        # TT store
+        flag = EXACT
+        if score <= orig_alpha:
+            flag = UPPERBOUND
+        elif score >= orig_beta:
+            flag = LOWERBOUND
+        self.tt[key] = tt_entry(depth, flag, score, best_local)
+
+        return score
