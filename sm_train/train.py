@@ -57,12 +57,12 @@ def main():
                 board.push(move)
 
                 # only log every 10 moves
-                if move_count % 10 == 0:
-                    san = board.san(move)
-                    probs   = root_policy[root_policy > 0]
-                    entropy = -(probs * torch.log(probs)).sum().item()
-                    print(f"    Move {move_count}: {san} "
-                          f"(entropy={entropy:.2f}, {time.time()-move_start:.2f}s)")
+                #if move_count % 10 == 0:
+                #    san = board.san(move)
+                #    probs   = root_policy[root_policy > 0]
+                #    entropy = -(probs * torch.log(probs)).sum().item()
+                #    print(f"    Move {move_count}: {san} "
+                #          f"(entropy={entropy:.2f}, {time.time()-move_start:.2f}s)")
 
                 game_states.append(board_to_tensor(board))
                 mcts_policies.append(root_policy)
