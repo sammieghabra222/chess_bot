@@ -4,6 +4,7 @@ import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 # --- Neural Network Definition for AlphaZero ---
 class AlphaZeroNet(nn.Module):
@@ -65,43 +66,59 @@ def move_to_index(move: chess.Move, board: chess.Board) -> int:
     piece = board.piece_at(move.from_square)
     if piece is None:
         raise ValueError("No piece at from_square.")
-    ff = chess.square_file(move.from_square)
-    rf = chess.square_rank(move.from_square)
-    tf = chess.square_file(move.to_square)
-    rt = chess.square_rank(move.to_square)
+
+    # mirror squares for Black so that White & Black share one viewpoint
+    from_sq = move.from_square
+    to_sq   = move.to_square
     if piece.color == chess.BLACK:
-        ms = chess.square_mirror(move.from_square)
-        ts = chess.square_mirror(move.to_square)
-        ff = chess.square_file(ms); rf = chess.square_rank(ms)
-        tf = chess.square_file(ts); rt = chess.square_rank(ts)
+        from_sq = chess.square_mirror(from_sq)
+        to_sq   = chess.square_mirror(to_sq)
+
+    ff, rf = chess.square_file(from_sq), chess.square_rank(from_sq)
+    tf, rt = chess.square_file(to_sq),   chess.square_rank(to_sq)
     dx, dy = tf - ff, rt - rf
-    # Knight
+
+    # 1) Knight
     if piece.piece_type == chess.KNIGHT:
         if abs(dx)==1 and abs(dy)==2:
-            td = "N" if dy>0 else "S"; od = "E" if dx>0 else "W"
+            pd = "N" if dy>0 else "S"
+            sd = "E" if dx>0 else "W"
+        elif abs(dx)==2 and abs(dy)==1:
+            pd = "E" if dx>0 else "W"
+            sd = "N" if dy>0 else "S"
         else:
-            td = "E" if dx>0 else "W"; od = "N" if dy>0 else "S"
-        code = ("knight",td,od)
-    # Underpromo
+            raise ValueError(f"Bad knight move dx={dx},dy={dy}")
+        code = ("knight", pd, sd)
+
+    # 2) Underpromotion
     elif piece.piece_type==chess.PAWN and move.promotion and move.promotion!=chess.QUEEN:
-        if dx==0: dstr="N"
-        elif dx>0: dstr="NE"
-        else: dstr="NW"
-        pstr = {chess.KNIGHT:"knight",chess.BISHOP:"bishop",chess.ROOK:"rook"}[move.promotion]
-        code = ("underpromo",dstr,pstr)
+        if dx==0:        dir_="N"
+        elif dx>0:       dir_="NE"
+        else:            dir_="NW"
+        promo_map = {
+            chess.KNIGHT:"knight",
+            chess.BISHOP:"bishop",
+            chess.ROOK:  "rook"
+        }
+        code = ("underpromo", dir_, promo_map[move.promotion])
+
+    # 3) Sliding / queen‐like (including normal pawn pushes & queen promotions)
     else:
-        if dx==0 and dy>0: code=(1,"N")
-        elif dx==0 and dy<0: code=(1,"S")
-        elif dy==0 and dx>0: code=(1,"E")
-        elif dy==0 and dx<0: code=(1,"W")
-        elif dx>0 and dy>0: code=(abs(dx),"NE")
-        elif dx<0 and dy>0: code=(abs(dx),"NW")
-        elif dx>0 and dy<0: code=(abs(dx),"SE")
-        elif dx<0 and dy<0: code=(abs(dx),"SW")
+        if   dx==0 and dy>0:  dir_,dist = "N",  dy
+        elif dx==0 and dy<0:  dir_,dist = "S",  abs(dy)
+        elif dy==0 and dx>0:  dir_,dist = "E",  dx
+        elif dy==0 and dx<0:  dir_,dist = "W",  abs(dx)
+        elif dx>0 and dy>0 and dx==dy:      dir_,dist = "NE", dx
+        elif dx<0 and dy>0 and abs(dx)==dy: dir_,dist = "NW", dy
+        elif dx>0 and dy<0 and dx==abs(dy): dir_,dist = "SE", dx
+        elif dx<0 and dy<0 and dx==dy:      dir_,dist = "SW", abs(dx)
         else:
-            raise ValueError("Unexpected move.")
-    base = _codes[code]
-    return base + 64*chess.square_rank(move.from_square) + chess.square_file(move.from_square)
+            raise ValueError(f"Unexpected slide dx={dx},dy={dy}")
+        code = (dist, dir_)
+
+    # lookup plane and combine with the mirrored-from_sq
+    plane_index = _codes[code]       # 0–72
+    return plane_index * 64 + from_sq
 
 
 def board_to_tensor(board: chess.Board) -> torch.Tensor:
@@ -140,13 +157,20 @@ class Node:
             v=-v; node=node.parent
 
 class AlphaZeroStrategy:
-    def __init__(self, model_path=None, simulations=200):
-        self.model=AlphaZeroNet()
+    def __init__(self,
+                 model_path=None,
+                 simulations=200,
+                 noise_eps: float = 0.25,    # how much noise to mix in
+                 noise_alpha: float = 0.03   # alpha parameter for Dirichlet
+                 ):
+        self.model = AlphaZeroNet()
         if model_path:
-            self.model.load_state_dict(torch.load(model_path,map_location='cpu'))
+            self.model.load_state_dict(torch.load(model_path, map_location='cpu'))
         self.model.eval()
-        self.simulations=simulations
-        self.last_root_policy=None
+        self.simulations = simulations
+        self.noise_eps = noise_eps
+        self.noise_alpha = noise_alpha
+        self.last_root_policy = None
     
     def select_move(self,board):
         mv,_=self._run_mcts(board)
@@ -155,35 +179,69 @@ class AlphaZeroStrategy:
     def select_move_with_policy(self,board):
         return self._run_mcts(board)
 
-    def _run_mcts(self,board):
-        root=Node(board.copy())
+    def _run_mcts(self, board):
+        root = Node(board.copy())
+
+        # 1) INITIAL EXPANSION OF ROOT
+        x = board_to_tensor(root.board)
+        with torch.no_grad():
+            logits, _ = self.model(x)
+            priors = torch.softmax(logits, dim=1)[0]
+
+        # mask illegal moves
+        mask = torch.zeros_like(priors)
+        for mv in root.board.legal_moves:
+            mask[move_to_index(mv, root.board)] = 1
+        priors = priors * mask
+        if priors.sum() > 0:
+            priors = priors / priors.sum()
+
+        # expand the root with those priors
+        root.expand(priors)
+
+        # 2) ADD DIRICHLET NOISE
+        # get the list of root moves in a fixed order
+        root_moves = list(root.children.keys())
+        # sample a Dirichlet distribution over them
+        noise = np.random.dirichlet([self.noise_alpha] * len(root_moves))
+        # mix it into each child’s prior P
+        for i, mv in enumerate(root_moves):
+            child = root.children[mv]
+            child.P = child.P * (1 - self.noise_eps) + noise[i] * self.noise_eps
+
+        # 3) STANDARD MCTS SIMULATIONS
         for _ in range(self.simulations):
-            node=root
-            # 1) Selection
-            while node.is_expanded(): _,node=node.select_child()
-            # 2) Evaluation & Expansion
+            node = root
+            # SELECTION
+            while node.is_expanded():
+                _, node = node.select_child()
+            # EXPANSION & EVALUATION
             if not node.board.is_game_over():
-                x=board_to_tensor(node.board)
-                with torch.no_grad(): logits,val=self.model(x)
-                probs=torch.softmax(logits,dim=1)[0]
-                mask=torch.zeros_like(probs)
+                x = board_to_tensor(node.board)
+                with torch.no_grad():
+                    logits, val = self.model(x)
+                probs = torch.softmax(logits, dim=1)[0]
+                # mask and renormalize, then expand
+                mask = torch.zeros_like(probs)
                 for mv in node.board.legal_moves:
-                    mask[move_to_index(mv,node.board)] = 1
-                probs=probs*mask
-                if probs.sum()>0: probs=probs/probs.sum()
+                    mask[move_to_index(mv, node.board)] = 1
+                probs = probs * mask
+                if probs.sum() > 0:
+                    probs = probs / probs.sum()
                 node.expand(probs)
-                value=val.item()
+                value = val.item()
             else:
+                # terminal position
                 value = -1.0 if node.board.is_checkmate() else 0.0
-            # 3) Backpropagation
             node.backpropagate(value)
-        # Collect root policy
-        policy=torch.zeros(4672)
-        for mv,ch in root.children.items():
-            idx=move_to_index(mv,root.board)
-            policy[idx]=ch.N
-        if policy.sum()>0: policy/=policy.sum()
-        self.last_root_policy=policy
-        # Best move
-        best_move=max(root.children.items(),key=lambda itm: itm[1].N)[0]
+
+        # 4) BUILD ROOT POLICY & PICK BEST
+        policy = torch.zeros(4672)
+        for mv, ch in root.children.items():
+            idx = move_to_index(mv, root.board)
+            policy[idx] = ch.N
+        if policy.sum() > 0:
+            policy /= policy.sum()
+
+        best_move = max(root.children.items(), key=lambda it: it[1].N)[0]
         return best_move, policy
