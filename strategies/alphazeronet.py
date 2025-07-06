@@ -4,6 +4,7 @@ import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 # --- Neural Network Definition for AlphaZero ---
 class AlphaZeroNet(nn.Module):
@@ -156,13 +157,20 @@ class Node:
             v=-v; node=node.parent
 
 class AlphaZeroStrategy:
-    def __init__(self, model_path=None, simulations=200):
-        self.model=AlphaZeroNet()
+    def __init__(self,
+                 model_path=None,
+                 simulations=200,
+                 noise_eps: float = 0.25,    # how much noise to mix in
+                 noise_alpha: float = 0.03   # alpha parameter for Dirichlet
+                 ):
+        self.model = AlphaZeroNet()
         if model_path:
-            self.model.load_state_dict(torch.load(model_path,map_location='cpu'))
+            self.model.load_state_dict(torch.load(model_path, map_location='cpu'))
         self.model.eval()
-        self.simulations=simulations
-        self.last_root_policy=None
+        self.simulations = simulations
+        self.noise_eps = noise_eps
+        self.noise_alpha = noise_alpha
+        self.last_root_policy = None
     
     def select_move(self,board):
         mv,_=self._run_mcts(board)
@@ -171,35 +179,69 @@ class AlphaZeroStrategy:
     def select_move_with_policy(self,board):
         return self._run_mcts(board)
 
-    def _run_mcts(self,board):
-        root=Node(board.copy())
+    def _run_mcts(self, board):
+        root = Node(board.copy())
+
+        # 1) INITIAL EXPANSION OF ROOT
+        x = board_to_tensor(root.board)
+        with torch.no_grad():
+            logits, _ = self.model(x)
+            priors = torch.softmax(logits, dim=1)[0]
+
+        # mask illegal moves
+        mask = torch.zeros_like(priors)
+        for mv in root.board.legal_moves:
+            mask[move_to_index(mv, root.board)] = 1
+        priors = priors * mask
+        if priors.sum() > 0:
+            priors = priors / priors.sum()
+
+        # expand the root with those priors
+        root.expand(priors)
+
+        # 2) ADD DIRICHLET NOISE
+        # get the list of root moves in a fixed order
+        root_moves = list(root.children.keys())
+        # sample a Dirichlet distribution over them
+        noise = np.random.dirichlet([self.noise_alpha] * len(root_moves))
+        # mix it into each child’s prior P
+        for i, mv in enumerate(root_moves):
+            child = root.children[mv]
+            child.P = child.P * (1 - self.noise_eps) + noise[i] * self.noise_eps
+
+        # 3) STANDARD MCTS SIMULATIONS
         for _ in range(self.simulations):
-            node=root
-            # 1) Selection
-            while node.is_expanded(): _,node=node.select_child()
-            # 2) Evaluation & Expansion
+            node = root
+            # SELECTION
+            while node.is_expanded():
+                _, node = node.select_child()
+            # EXPANSION & EVALUATION
             if not node.board.is_game_over():
-                x=board_to_tensor(node.board)
-                with torch.no_grad(): logits,val=self.model(x)
-                probs=torch.softmax(logits,dim=1)[0]
-                mask=torch.zeros_like(probs)
+                x = board_to_tensor(node.board)
+                with torch.no_grad():
+                    logits, val = self.model(x)
+                probs = torch.softmax(logits, dim=1)[0]
+                # mask and renormalize, then expand
+                mask = torch.zeros_like(probs)
                 for mv in node.board.legal_moves:
-                    mask[move_to_index(mv,node.board)] = 1
-                probs=probs*mask
-                if probs.sum()>0: probs=probs/probs.sum()
+                    mask[move_to_index(mv, node.board)] = 1
+                probs = probs * mask
+                if probs.sum() > 0:
+                    probs = probs / probs.sum()
                 node.expand(probs)
-                value=val.item()
+                value = val.item()
             else:
+                # terminal position
                 value = -1.0 if node.board.is_checkmate() else 0.0
-            # 3) Backpropagation
             node.backpropagate(value)
-        # Collect root policy
-        policy=torch.zeros(4672)
-        for mv,ch in root.children.items():
-            idx=move_to_index(mv,root.board)
-            policy[idx]=ch.N
-        if policy.sum()>0: policy/=policy.sum()
-        self.last_root_policy=policy
-        # Best move
-        best_move=max(root.children.items(),key=lambda itm: itm[1].N)[0]
+
+        # 4) BUILD ROOT POLICY & PICK BEST
+        policy = torch.zeros(4672)
+        for mv, ch in root.children.items():
+            idx = move_to_index(mv, root.board)
+            policy[idx] = ch.N
+        if policy.sum() > 0:
+            policy /= policy.sum()
+
+        best_move = max(root.children.items(), key=lambda it: it[1].N)[0]
         return best_move, policy

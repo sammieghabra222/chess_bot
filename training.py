@@ -6,12 +6,12 @@ from strategies.alphazeronet import AlphaZeroStrategy, board_to_tensor
 
 # === Configuration ===
 num_iterations       = 100   # training rounds
-games_per_iteration  = 10    # self‐play games per round
+games_per_iteration  = 50    # self‐play games per round
 simulations          = 200   # MCTS sims per move
 move_limit           = 200   # max moves (ply) per game
 
 # === Initialize ===
-engine    = AlphaZeroStrategy(simulations=simulations)
+engine    = AlphaZeroStrategy(simulations=simulations, noise_eps=0.25, noise_alpha=0.03)
 optimizer = torch.optim.Adam(engine.model.parameters(), lr=0.001)
 
 for iteration in range(1, num_iterations+1):
@@ -83,6 +83,7 @@ for iteration in range(1, num_iterations+1):
     print(f"  Prepared batch: {len(training_data)} examples")
 
     # 3) Forward & Loss
+    engine.model.train()
     pred_policies, pred_values = engine.model(states)
     value_loss  = F.mse_loss(pred_values, target_values)
     policy_loss = -torch.mean((target_policies *
@@ -96,6 +97,7 @@ for iteration in range(1, num_iterations+1):
     loss.backward()
     optimizer.step()
     print("  Model updated")
+    engine.model.eval()
 
     # 5) Checkpoint
     ckpt = f"model_iter{iteration}.pth"
