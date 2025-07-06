@@ -65,43 +65,59 @@ def move_to_index(move: chess.Move, board: chess.Board) -> int:
     piece = board.piece_at(move.from_square)
     if piece is None:
         raise ValueError("No piece at from_square.")
-    ff = chess.square_file(move.from_square)
-    rf = chess.square_rank(move.from_square)
-    tf = chess.square_file(move.to_square)
-    rt = chess.square_rank(move.to_square)
+
+    # mirror squares for Black so that White & Black share one viewpoint
+    from_sq = move.from_square
+    to_sq   = move.to_square
     if piece.color == chess.BLACK:
-        ms = chess.square_mirror(move.from_square)
-        ts = chess.square_mirror(move.to_square)
-        ff = chess.square_file(ms); rf = chess.square_rank(ms)
-        tf = chess.square_file(ts); rt = chess.square_rank(ts)
+        from_sq = chess.square_mirror(from_sq)
+        to_sq   = chess.square_mirror(to_sq)
+
+    ff, rf = chess.square_file(from_sq), chess.square_rank(from_sq)
+    tf, rt = chess.square_file(to_sq),   chess.square_rank(to_sq)
     dx, dy = tf - ff, rt - rf
-    # Knight
+
+    # 1) Knight
     if piece.piece_type == chess.KNIGHT:
         if abs(dx)==1 and abs(dy)==2:
-            td = "N" if dy>0 else "S"; od = "E" if dx>0 else "W"
+            pd = "N" if dy>0 else "S"
+            sd = "E" if dx>0 else "W"
+        elif abs(dx)==2 and abs(dy)==1:
+            pd = "E" if dx>0 else "W"
+            sd = "N" if dy>0 else "S"
         else:
-            td = "E" if dx>0 else "W"; od = "N" if dy>0 else "S"
-        code = ("knight",td,od)
-    # Underpromo
+            raise ValueError(f"Bad knight move dx={dx},dy={dy}")
+        code = ("knight", pd, sd)
+
+    # 2) Underpromotion
     elif piece.piece_type==chess.PAWN and move.promotion and move.promotion!=chess.QUEEN:
-        if dx==0: dstr="N"
-        elif dx>0: dstr="NE"
-        else: dstr="NW"
-        pstr = {chess.KNIGHT:"knight",chess.BISHOP:"bishop",chess.ROOK:"rook"}[move.promotion]
-        code = ("underpromo",dstr,pstr)
+        if dx==0:        dir_="N"
+        elif dx>0:       dir_="NE"
+        else:            dir_="NW"
+        promo_map = {
+            chess.KNIGHT:"knight",
+            chess.BISHOP:"bishop",
+            chess.ROOK:  "rook"
+        }
+        code = ("underpromo", dir_, promo_map[move.promotion])
+
+    # 3) Sliding / queen‐like (including normal pawn pushes & queen promotions)
     else:
-        if dx==0 and dy>0: code=(1,"N")
-        elif dx==0 and dy<0: code=(1,"S")
-        elif dy==0 and dx>0: code=(1,"E")
-        elif dy==0 and dx<0: code=(1,"W")
-        elif dx>0 and dy>0: code=(abs(dx),"NE")
-        elif dx<0 and dy>0: code=(abs(dx),"NW")
-        elif dx>0 and dy<0: code=(abs(dx),"SE")
-        elif dx<0 and dy<0: code=(abs(dx),"SW")
+        if   dx==0 and dy>0:  dir_,dist = "N",  dy
+        elif dx==0 and dy<0:  dir_,dist = "S",  abs(dy)
+        elif dy==0 and dx>0:  dir_,dist = "E",  dx
+        elif dy==0 and dx<0:  dir_,dist = "W",  abs(dx)
+        elif dx>0 and dy>0 and dx==dy:      dir_,dist = "NE", dx
+        elif dx<0 and dy>0 and abs(dx)==dy: dir_,dist = "NW", dy
+        elif dx>0 and dy<0 and dx==abs(dy): dir_,dist = "SE", dx
+        elif dx<0 and dy<0 and dx==dy:      dir_,dist = "SW", abs(dx)
         else:
-            raise ValueError("Unexpected move.")
-    base = _codes[code]
-    return base + 64*chess.square_rank(move.from_square) + chess.square_file(move.from_square)
+            raise ValueError(f"Unexpected slide dx={dx},dy={dy}")
+        code = (dist, dir_)
+
+    # lookup plane and combine with the mirrored-from_sq
+    plane_index = _codes[code]       # 0–72
+    return plane_index * 64 + from_sq
 
 
 def board_to_tensor(board: chess.Board) -> torch.Tensor:
